@@ -15,11 +15,12 @@ import (
 func (s *Service) ProcessFiles(ctx context.Context, filenames <-chan string) {
 	wg := &sync.WaitGroup{}
 	for filename := range filenames {
+		s.semaphore <- struct{}{}
+
 		s.fipMutex.Lock()
 		s.filesInProgress[filename] = true
 		s.fipMutex.Unlock()
 
-		s.semaphore <- struct{}{}
 		wg.Add(1)
 		go func(f string) {
 			// В этой горутине в случае ошибки перемещать файл
@@ -36,35 +37,58 @@ func (s *Service) ProcessFiles(ctx context.Context, filenames <-chan string) {
 				s.logger.Error("Failed to parse file", "file", f, "error", err)
 				return
 			}
-			errChan1 := s.createPDFs(iterCtx, tsvChan1, f)
-			errChan2 := s.saveToDB(iterCtx, tsvChan2, f)
+			errChanPDF := s.createPDFs(iterCtx, tsvChan1, f)
+			errChanDB := s.saveToDB(iterCtx, tsvChan2, f)
 
 			// в данном случае поддерживаю консистентное состояние, при котором
 			// файл считается обработанным, только если оба канала ошибок вернули nil
+			// сначала жду ошибку из канала сохранения в БД, так как это более критичная операция, и если она не удалась, то нет смысла создавать PDF
 			var finalErr error
 			for range 2 {
+				if finalErr != nil {
+					iterCancel()
+					break
+				}
 				select {
-				case err := <-errChan1:
-					if err != nil {
-						s.logger.Error("Failed to create PDFs", "file", f, "error", err)
-						// move(s.SourcePath, s.ErrorPath, f) // перемещаю файл в папку с ошибками
-						finalErr = err
-						return
-					}
-					errChan1 = nil
-				case err := <-errChan2:
+				case err := <-errChanDB:
 					if err != nil {
 						s.logger.Error("Failed to save to DB", "file", f, "error", err)
 						finalErr = err
-						return
 					}
-					errChan2 = nil
+					errChanDB = nil
+				case err := <-errChanPDF:
+					if err != nil {
+						s.logger.Error("Failed to save to PDF", "file", f, "error", err)
+						finalErr = err
+					}
+					errChanPDF = nil
 				case <-ctx.Done():
 					s.logger.Error("Processing timed out", "file", f)
 					finalErr = ctx.Err()
-					return
 				}
 			}
+
+			// case err := <-errChanDB:
+			// 	if err != nil {
+			// 		s.logger.Error("Failed to save to DB", "file", f, "error", err)
+			// 		finalErr = err
+			// 	}
+			// case <-ctx.Done():
+			// 	s.logger.Error("Processing timed out", "file", f)
+			// 	finalErr = ctx.Err()
+			// }
+			// if finalErr == nil {
+			// 	select {
+			// 	case err := <-errChanPDF:
+			// 		if err != nil {
+			// 			s.logger.Error("Failed to save to PDF", "file", f, "error", err)
+			// 			finalErr = err
+			// 		}
+			// 	case <-ctx.Done():
+			// 		s.logger.Error("Processing timed out", "file", f)
+			// 		finalErr = ctx.Err()
+			// 	}
+			// }
 
 			// на этом этапе файл уже обработан
 			// если произошла ошибка при перемещении файла,

@@ -29,8 +29,8 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 		return nil, nil, err
 	}
 	// out1, out2 := make(chan LineBatch), make(chan LineBatch)
-	out1 := make(chan StringLineBatch, 1)
-	out2 := make(chan StringLineBatch, 1)
+	out1 := make(chan StringLineBatch)
+	out2 := make(chan StringLineBatch)
 	go func() {
 		defer func() {
 			r := recover()
@@ -58,16 +58,17 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 			// ошибка или логируется, или передается дальше
 			// s.logger.Error("Чтение первой строки", "err", err.Error())
 			err = fmt.Errorf("Чтение первой строки: %w", err)
+			out11, out22 := out1, out2
 			for range 2 {
 				select {
 				case <-ctx.Done():
 					return
 				// case out1 <- LineBatch{Err: err}:
-				case out1 <- StringLineBatch{Err: err}:
-					out1 = nil
+				case out11 <- StringLineBatch{Err: err}:
+					out11 = nil
 				// case out2 <- LineBatch{Err: err}:
-				case out2 <- StringLineBatch{Err: err}:
-					out2 = nil
+				case out22 <- StringLineBatch{Err: err}:
+					out22 = nil
 				}
 			}
 			return
@@ -75,16 +76,17 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 		ok := s.parser.validateHeaders(hs)
 		if !ok {
 			err = errors.New("Заголовки не соответствуют ожидаемым")
+			out11, out22 := out1, out2
 			for range 2 {
 				select {
 				case <-ctx.Done():
 					return
 				// case out1 <- LineBatch{Err: err}:
-				case out1 <- StringLineBatch{Err: err}:
-					out1 = nil
+				case out11 <- StringLineBatch{Err: err}:
+					out11 = nil
 				// case out2 <- LineBatch{Err: err}:
-				case out2 <- StringLineBatch{Err: err}:
-					out2 = nil
+				case out22 <- StringLineBatch{Err: err}:
+					out22 = nil
 				}
 			}
 			return
@@ -101,7 +103,7 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 				if errors.Is(err, io.EOF) {
 					if len(batch) > 0 {
 						out11, out22 := out1, out2
-						for i := 0; i < 2; i++ {
+						for range 2 {
 							select {
 							case <-ctx.Done():
 								return
@@ -118,7 +120,7 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 				}
 				s.logger.Error("чтение TSV", "err", err.Error())
 				out11, out22 := out1, out2
-				for i := 0; i < 2; i++ {
+				for range 2 {
 					select {
 					case <-ctx.Done():
 						return
@@ -144,7 +146,7 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 			batch = append(batch, record)
 			if len(batch) >= s.BatchSize {
 				out11, out22 := out1, out2
-				for i := 0; i < 2; i++ {
+				for range 2 {
 					select {
 					case <-ctx.Done():
 						return

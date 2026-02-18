@@ -52,6 +52,7 @@ func (s *Service) streamFiles(ctx context.Context) <-chan string {
 					if !s.filesInProgress[files[i]] {
 						f = files[i]
 						files = files[i+1:]
+						break
 					}
 				}
 				s.fipMutex.RUnlock()
@@ -75,6 +76,7 @@ func (s *Service) streamFiles(ctx context.Context) <-chan string {
 						// на случай, если этого файла уже нет
 					}
 				case filesChan <- f:
+					fmt.Println("отдан", f)
 				}
 			}
 		}

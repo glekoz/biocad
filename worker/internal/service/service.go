@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/glekoz/biocad/worker/config"
 	"github.com/glekoz/biocad/worker/internal/service/pdf"
@@ -110,10 +111,113 @@ func NewService(cfg config.Worker, log *slog.Logger, r RepoAPI) (*Service, error
 // в бесплатных инструментах для генерации pdf нет возможности писать в файл по частям,
 // а нужно генерировать весь документ целиком, что требует хранения всех данных в памяти
 func (s *Service) Run(ctx context.Context) {
-	s.logger.Info("Service is running", "fromPath", s.SourcePath, "pollInterval", s.PollIntervalMs)
+	s.logger.Info("Service is running", "fromPath", s.SourcePath, "pollInterval", s.PollIntervalMs, "maxWorkers", s.MaxWorkers, "batchSize", s.BatchSize)
 
 	fileStream := s.streamFiles(ctx)
-	s.ProcessFiles(ctx, fileStream)
+
+	wg := &sync.WaitGroup{}
+	for filename := range fileStream {
+		s.semaphore <- struct{}{}
+
+		s.fipMutex.Lock()
+		s.filesInProgress[filename] = true
+		s.fipMutex.Unlock()
+
+		wg.Add(1)
+		go func(f string) {
+			// В этой горутине в случае ошибки перемещать файл
+			defer func() {
+				<-s.semaphore
+				wg.Done()
+			}()
+			// мб добавить настройку в .env для таймаута
+			iterCtx, iterCancel := context.WithTimeout(ctx, 5*time.Minute)
+			defer iterCancel()
+
+			tsvChan1, tsvChan2, err := s.streamTSV(iterCtx, f)
+			if err != nil {
+				s.logger.Error("Failed to parse file", "file", f, "error", err)
+				return
+			}
+			errChanPDF := s.createPDFs(iterCtx, tsvChan1, f)
+			errChanDB := s.saveToDB(iterCtx, tsvChan2, f)
+
+			// в данном случае поддерживаю консистентное состояние, при котором
+			// файл считается обработанным, только если оба канала ошибок вернули nil
+			// сначала жду ошибку из канала сохранения в БД, так как это более критичная операция, и если она не удалась, то нет смысла создавать PDF
+			var finalErr error
+			for range 2 {
+				if finalErr != nil {
+					iterCancel()
+					break
+				}
+				select {
+				case err := <-errChanDB:
+					if err != nil {
+						s.logger.Error("Failed to save to DB", "file", f, "error", err)
+						finalErr = err
+					}
+					errChanDB = nil
+				case err := <-errChanPDF:
+					if err != nil {
+						s.logger.Error("Failed to save to PDF", "file", f, "error", err)
+						finalErr = err
+					}
+					errChanPDF = nil
+				case <-ctx.Done():
+					s.logger.Error("Processing timed out", "file", f)
+					finalErr = ctx.Err()
+				}
+			}
+
+			// case err := <-errChanDB:
+			// 	if err != nil {
+			// 		s.logger.Error("Failed to save to DB", "file", f, "error", err)
+			// 		finalErr = err
+			// 	}
+			// case <-ctx.Done():
+			// 	s.logger.Error("Processing timed out", "file", f)
+			// 	finalErr = ctx.Err()
+			// }
+			// if finalErr == nil {
+			// 	select {
+			// 	case err := <-errChanPDF:
+			// 		if err != nil {
+			// 			s.logger.Error("Failed to save to PDF", "file", f, "error", err)
+			// 			finalErr = err
+			// 		}
+			// 	case <-ctx.Done():
+			// 		s.logger.Error("Processing timed out", "file", f)
+			// 		finalErr = ctx.Err()
+			// 	}
+			// }
+
+			// на этом этапе файл уже обработан
+			// если произошла ошибка при перемещении файла,
+			// то он остается в мапе и не будет обрабатываться повторно
+			if finalErr != nil {
+				err = move(s.SourcePath, s.ErrorPath, f) // перемещаю файл в папку с ошибками
+				if err != nil {
+					s.logger.Error("Failed to move file to errors directory", "file", f, "error", err)
+					return
+				}
+			} else {
+				err = move(s.SourcePath, s.CompletedPath, f)
+				if err != nil {
+					s.logger.Error("Failed to move file to completed directory", "file", f, "error", err)
+					return
+				}
+			}
+
+			s.fipMutex.Lock()
+			delete(s.filesInProgress, f)
+			s.fipMutex.Unlock()
+
+			s.logger.Info("Successfully processed file", "file", f)
+		}(filename)
+
+	}
+	wg.Wait()
 }
 
 // func (s *Service) createPDFs(ctx context.Context, in <-chan LineBatch) <-chan error {
@@ -138,13 +242,16 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 
 		defer func() {
 			if critErr != nil {
+				// fmt.Println(pdfguids)
 				for guid, seq := range pdfguids {
 					dir := filepath.Join(s.PDFPath, guid)
-					p := filepath.Join(dir, seq+".pdf")
-					err := os.Remove(p)
-					if err != nil {
-						s.logger.Error("Failed to remove PDF file during cleanup", "file", p, "error", err)
-						return
+					if seq != "" {
+						p := filepath.Join(dir, seq+".pdf")
+						err := os.Remove(p)
+						if err != nil {
+							s.logger.Error("Failed to remove PDF file during cleanup", "file", p, "error", err)
+							return
+						}
 					}
 
 					s.gipMutex.Lock()
@@ -198,7 +305,7 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 				break outermost
 			}
 			for i, rec := range batch.Records {
-				if i%500 == 0 {
+				if i%(s.BatchSize>>1) == 0 {
 					if ctx.Err() != nil {
 						critErr = ctx.Err()
 						s.logger.Error("Context error in createPDFs", "error", critErr)
@@ -206,7 +313,6 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 					}
 				}
 				if recordsByID[rec[3]] == nil {
-					// неправильно
 					recordsByID[rec[3]] = [][]string{rec}
 				} else {
 					recordsByID[rec[3]] = append(recordsByID[rec[3]], rec)
@@ -229,6 +335,10 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 					s.logger.Error("Failed to create PDF directory", "guid", guid, "error", err)
 					break outermost
 				}
+
+				// пустая строка нужна, чтобы появилась запись в мапе
+				// чтобы удалить лишнюю директорию в случае ошибки, так как она создается до генерации PDF
+				pdfguids[guid] = ""
 				pdfPath := filepath.Join(dir, seq+".pdf")
 
 				pdfer := pdf.NewHandler(s.PDFConfig)
@@ -266,11 +376,13 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 			}
 		}
 
-		if critErr != nil {
-			out <- critErr
-		} else {
-			out <- nil
+		select {
+		case <-ctx.Done():
+			s.logger.Error("Context error in createPDFs", "error", ctx.Err())
+			critErr = ctx.Err()
+		case out <- critErr:
 		}
+
 	}()
 
 	return out
@@ -284,7 +396,11 @@ func (s *Service) saveToDB(ctx context.Context, in <-chan StringLineBatch, filen
 		for range in {
 			fmt.Println("Saving to DB from file", filename)
 		}
-		out <- nil
+		select {
+		case <-ctx.Done():
+			s.logger.Error("Context error in DB", "error", ctx.Err())
+		case out <- nil:
+		}
 	}()
 	return out
 }

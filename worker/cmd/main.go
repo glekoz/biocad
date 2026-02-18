@@ -11,10 +11,12 @@ import (
 	"github.com/glekoz/biocad/worker/config"
 	"github.com/glekoz/biocad/worker/internal/service"
 	"github.com/glekoz/biocad/worker/pkg/logger"
+	"github.com/joho/godotenv"
 )
 
 func main() {
-
+	// чтобы локально работало
+	godotenv.Load(`C:\Users\ppota\WebDev\Golang\biocad\.env`)
 	cfg, err := config.NewConfig()
 	if err != nil {
 		log.Fatal(err)

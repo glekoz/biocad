@@ -1,6 +1,8 @@
 package pdf
 
 import (
+	_ "embed"
+
 	"github.com/johnfercher/maroto/v2"
 	"github.com/johnfercher/maroto/v2/pkg/components/row"
 	"github.com/johnfercher/maroto/v2/pkg/components/text"
@@ -38,10 +40,13 @@ type Handler struct {
 	cfg customConf
 }
 
+//go:embed fonts/NotoSans-Regular.ttf
+var notosansFont []byte
+
 // конфиг должен храниться в сервисе
 func GetConfig(headers []string) (*Config, error) {
 	rf := repository.New()
-	rf.AddUTF8Font("notosans", fontstyle.Normal, "./internal/fonts/NotoSans-Regular.ttf")
+	rf.AddUTF8FontFromBytes("notosans", fontstyle.Normal, notosansFont)
 	fs, err := rf.Load()
 	if err != nil {
 		return nil, err
