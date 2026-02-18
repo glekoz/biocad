@@ -13,11 +13,11 @@ type (
 	}
 
 	Worker struct {
-		FromPath       string `env:"BIOCAD_DIR_PATH,required"`
-		PollIntervalMs int    `env:"BIOCAD_POLL_INTERVAL_MS" envDefault:"5000"`
-		MaxWorkers     int    `env:"BIOCAD_MAX_WORKERS" envDefault:"3"`
-		// добавить batch size для обработки файлов, чтобы не обрабатывать по одной строке, а обрабатывать пачками, например по 1000 строк, чтобы оптимизировать работу с БД
-		BatchSize int `env:"BIOCAD_BATCH_SIZE" envDefault:"1000"`
+		FromPath                     string `env:"BIOCAD_DIR_PATH,required"`
+		PollIntervalMs               int    `env:"BIOCAD_POLL_INTERVAL_MS" envDefault:"5000"`
+		MaxWorkers                   int    `env:"BIOCAD_MAX_WORKERS" envDefault:"3"`
+		BatchSize                    int    `env:"BIOCAD_BATCH_SIZE" envDefault:"1000"`
+		FileProcessingTimeoutSeconds int    `env:"BIOCAD_FILE_PROCESSING_TIMEOUT_SECONDS" envDefault:"300"`
 	}
 
 	// connStr := "postgres://username:secure-password@localhost:port/mydb?sslmode=require"

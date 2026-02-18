@@ -11,12 +11,10 @@ import (
 	"github.com/glekoz/biocad/worker/config"
 	"github.com/glekoz/biocad/worker/internal/service"
 	"github.com/glekoz/biocad/worker/pkg/logger"
-	"github.com/joho/godotenv"
 )
 
 func main() {
-	// чтобы локально работало
-	godotenv.Load(`C:\Users\ppota\WebDev\Golang\biocad\.env`)
+
 	cfg, err := config.NewConfig()
 	if err != nil {
 		log.Fatal(err)
@@ -30,7 +28,7 @@ func main() {
 	var repo service.RepoAPI
 
 	// Initialize service
-	svc, err := service.NewService(cfg.Worker, logger, repo)
+	svc, err := service.New(cfg.Worker, logger, repo)
 	if err != nil {
 		log.Fatal("Failed to create service:", err)
 	}

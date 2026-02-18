@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/glekoz/biocad/worker/config"
+	"github.com/glekoz/biocad/worker/internal/service/helper"
 	"github.com/glekoz/biocad/worker/internal/service/pdf"
+	"github.com/glekoz/biocad/worker/pkg/logger"
 	"github.com/rs/xid"
 )
 
@@ -24,14 +26,15 @@ type RepoAPI interface {
 }
 
 type Service struct {
-	SourcePath     string
-	CompletedPath  string
-	ErrorPath      string // в этой директории также должен быть файл, в котором были бы записаны имена файлов, при перемещении которых возникла ошибка
-	PDFPath        string
-	PDFConfig      *pdf.Config
-	PollIntervalMs int
-	MaxWorkers     int
-	BatchSize      int
+	SourcePath                   string
+	CompletedPath                string
+	ErrorPath                    string
+	PDFPath                      string
+	PDFConfig                    *pdf.Config
+	PollIntervalMs               int
+	MaxWorkers                   int
+	BatchSize                    int
+	FileProcessingTimeoutSeconds int
 
 	logger    *slog.Logger
 	repo      RepoAPI
@@ -45,7 +48,7 @@ type Service struct {
 	gipMutex        *sync.Mutex
 }
 
-func NewService(cfg config.Worker, log *slog.Logger, r RepoAPI) (*Service, error) {
+func New(cfg config.Worker, log *slog.Logger, r RepoAPI) (*Service, error) {
 	cfg.FromPath = filepath.Clean(cfg.FromPath)
 	if !filepath.IsAbs(cfg.FromPath) {
 		return nil, fmt.Errorf("Provided dir path is not absolute: %s", cfg.FromPath)
@@ -85,14 +88,15 @@ func NewService(cfg config.Worker, log *slog.Logger, r RepoAPI) (*Service, error
 	}
 
 	return &Service{
-		SourcePath:     cfg.FromPath,
-		CompletedPath:  completedPath,
-		ErrorPath:      errorPath,
-		PDFPath:        pdfPath,
-		PDFConfig:      pdfConf,
-		PollIntervalMs: cfg.PollIntervalMs,
-		MaxWorkers:     cfg.MaxWorkers,
-		BatchSize:      cfg.BatchSize,
+		SourcePath:                   cfg.FromPath,
+		CompletedPath:                completedPath,
+		ErrorPath:                    errorPath,
+		PDFPath:                      pdfPath,
+		PDFConfig:                    pdfConf,
+		PollIntervalMs:               cfg.PollIntervalMs,
+		MaxWorkers:                   cfg.MaxWorkers,
+		BatchSize:                    cfg.BatchSize,
+		FileProcessingTimeoutSeconds: cfg.FileProcessingTimeoutSeconds,
 
 		logger:    log,
 		repo:      r,
@@ -107,9 +111,6 @@ func NewService(cfg config.Worker, log *slog.Logger, r RepoAPI) (*Service, error
 	}, nil
 }
 
-// эффективность потоковой обработки снижена из-за того, что
-// в бесплатных инструментах для генерации pdf нет возможности писать в файл по частям,
-// а нужно генерировать весь документ целиком, что требует хранения всех данных в памяти
 func (s *Service) Run(ctx context.Context) {
 	s.logger.Info("Service is running", "fromPath", s.SourcePath, "pollInterval", s.PollIntervalMs, "maxWorkers", s.MaxWorkers, "batchSize", s.BatchSize)
 
@@ -118,29 +119,32 @@ func (s *Service) Run(ctx context.Context) {
 	wg := &sync.WaitGroup{}
 	for filename := range fileStream {
 		s.semaphore <- struct{}{}
-
-		s.fipMutex.Lock()
-		s.filesInProgress[filename] = true
-		s.fipMutex.Unlock()
-
 		wg.Add(1)
-		go func(f string) {
-			// В этой горутине в случае ошибки перемещать файл
+		go func() {
 			defer func() {
+				r := recover()
+				if r != nil {
+					s.logger.Error("Panic recovered in file processing: %v", r)
+				}
 				<-s.semaphore
 				wg.Done()
 			}()
-			// мб добавить настройку в .env для таймаута
-			iterCtx, iterCancel := context.WithTimeout(ctx, 5*time.Minute)
-			defer iterCancel()
 
-			tsvChan1, tsvChan2, err := s.streamTSV(iterCtx, f)
+			s.fipMutex.Lock()
+			s.filesInProgress[filename] = true
+			s.fipMutex.Unlock()
+
+			iterCtx, iterCancel := context.WithTimeout(ctx, time.Duration(s.FileProcessingTimeoutSeconds)*time.Second)
+			defer iterCancel()
+			iterCtx = logger.WithFilename(iterCtx, filename)
+
+			tsvChan1, tsvChan2, err := s.streamTSV(iterCtx, filename)
 			if err != nil {
-				s.logger.Error("Failed to parse file", "file", f, "error", err)
+				s.logger.Error("Failed to parse file", "file", filename, "error", err)
 				return
 			}
-			errChanPDF := s.createPDFs(iterCtx, tsvChan1, f)
-			errChanDB := s.saveToDB(iterCtx, tsvChan2, f)
+			errChanPDF := s.createPDFs(iterCtx, tsvChan1, filename)
+			errChanDB := s.saveToDB(iterCtx, tsvChan2, filename)
 
 			// в данном случае поддерживаю консистентное состояние, при котором
 			// файл считается обработанным, только если оба канала ошибок вернули nil
@@ -154,67 +158,45 @@ func (s *Service) Run(ctx context.Context) {
 				select {
 				case err := <-errChanDB:
 					if err != nil {
-						s.logger.Error("Failed to save to DB", "file", f, "error", err)
+						s.logger.Error("Failed to save to DB", "file", filename, "error", err)
 						finalErr = err
 					}
 					errChanDB = nil
 				case err := <-errChanPDF:
 					if err != nil {
-						s.logger.Error("Failed to save to PDF", "file", f, "error", err)
+						s.logger.Error("Failed to save to PDF", "file", filename, "error", err)
 						finalErr = err
 					}
 					errChanPDF = nil
 				case <-ctx.Done():
-					s.logger.Error("Processing timed out", "file", f)
+					s.logger.Error("Processing timed out", "file", filename)
 					finalErr = ctx.Err()
 				}
 			}
 
-			// case err := <-errChanDB:
-			// 	if err != nil {
-			// 		s.logger.Error("Failed to save to DB", "file", f, "error", err)
-			// 		finalErr = err
-			// 	}
-			// case <-ctx.Done():
-			// 	s.logger.Error("Processing timed out", "file", f)
-			// 	finalErr = ctx.Err()
-			// }
-			// if finalErr == nil {
-			// 	select {
-			// 	case err := <-errChanPDF:
-			// 		if err != nil {
-			// 			s.logger.Error("Failed to save to PDF", "file", f, "error", err)
-			// 			finalErr = err
-			// 		}
-			// 	case <-ctx.Done():
-			// 		s.logger.Error("Processing timed out", "file", f)
-			// 		finalErr = ctx.Err()
-			// 	}
-			// }
-
-			// на этом этапе файл уже обработан
+			// на этом этапе файл уже обработан, поэтому
 			// если произошла ошибка при перемещении файла,
 			// то он остается в мапе и не будет обрабатываться повторно
 			if finalErr != nil {
-				err = move(s.SourcePath, s.ErrorPath, f) // перемещаю файл в папку с ошибками
+				err = helper.Move(s.SourcePath, s.ErrorPath, filename)
 				if err != nil {
-					s.logger.Error("Failed to move file to errors directory", "file", f, "error", err)
+					s.logger.Error("Failed to move file to errors directory", "file", filename, "error", err)
 					return
 				}
 			} else {
-				err = move(s.SourcePath, s.CompletedPath, f)
+				err = helper.Move(s.SourcePath, s.CompletedPath, filename)
 				if err != nil {
-					s.logger.Error("Failed to move file to completed directory", "file", f, "error", err)
+					s.logger.Error("Failed to move file to completed directory", "file", filename, "error", err)
 					return
 				}
 			}
 
 			s.fipMutex.Lock()
-			delete(s.filesInProgress, f)
+			delete(s.filesInProgress, filename)
 			s.fipMutex.Unlock()
 
-			s.logger.Info("Successfully processed file", "file", f)
-		}(filename)
+			s.logger.Info("Successfully processed file", "file", filename)
+		}()
 
 	}
 	wg.Wait()
@@ -292,6 +274,7 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 
 	outermost:
 		for batch := range in {
+
 			// если возможно продолжить работу при ошибке,
 			// то можно продолжить считывать из канала, но не обрабатывать данные
 			// для этого в последних ошибках надо убрать break outermost
@@ -302,7 +285,7 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 			if batch.Err != nil {
 				critErr = batch.Err
 				s.logger.Error("Error in createPDFs batch", "error", critErr)
-				break outermost
+				break
 			}
 			for i, rec := range batch.Records {
 				if i%(s.BatchSize>>1) == 0 {
@@ -318,62 +301,61 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 					recordsByID[rec[3]] = append(recordsByID[rec[3]], rec)
 				}
 			}
-
-			// как будто есть потенциал для распараллеливания
-			for guid, recs := range recordsByID {
-				if ctx.Err() != nil {
-					critErr = ctx.Err()
-					s.logger.Error("Context error in createPDFs", "error", critErr)
-					break outermost
-				}
-
-				seq := xid.New().String()
-				dir := filepath.Join(s.PDFPath, guid)
-				err := os.MkdirAll(dir, 0755)
-				if err != nil {
-					critErr = err
-					s.logger.Error("Failed to create PDF directory", "guid", guid, "error", err)
-					break outermost
-				}
-
-				// пустая строка нужна, чтобы появилась запись в мапе
-				// чтобы удалить лишнюю директорию в случае ошибки, так как она создается до генерации PDF
-				pdfguids[guid] = ""
-				pdfPath := filepath.Join(dir, seq+".pdf")
-
-				pdfer := pdf.NewHandler(s.PDFConfig)
-				pdfer.AddTitleAndHeader(fmt.Sprintf("Results for unit %s from file %s", guid, filename))
-				pdfer.AddDataRows(recs)
-				document, err := pdfer.Generate()
-				if err != nil {
-					critErr = err
-					s.logger.Error("Failed to generate PDF document", "guid", guid, "error", err)
-					break outermost
-				}
-
-				// на случай, если в ДРУГИХ ФАЙЛАХ также есть одинаковый guid
-				s.gipMutex.Lock()
-				mc, exists := s.guidsInProgress[guid]
-				if exists {
-					mc.count++
-				} else {
-					mc = &MutexCounter{mu: &sync.Mutex{}, count: 1}
-					s.guidsInProgress[guid] = mc
-				}
-				s.gipMutex.Unlock()
-
-				mc.mu.Lock()
-				err = document.Save(pdfPath)
-				if err != nil {
-					mc.mu.Unlock()
-					critErr = err
-					s.logger.Error("Failed to generate PDF document", "guid", guid, "error", err)
-					break outermost
-				}
-				mc.mu.Unlock()
-
-				pdfguids[guid] = seq
+		}
+		// как будто есть потенциал для распараллеливания
+		for guid, recs := range recordsByID {
+			if ctx.Err() != nil {
+				critErr = ctx.Err()
+				s.logger.Error("Context error in createPDFs", "error", critErr)
+				break
 			}
+
+			seq := xid.New().String()
+			dir := filepath.Join(s.PDFPath, guid)
+			err := os.MkdirAll(dir, 0755)
+			if err != nil {
+				critErr = err
+				s.logger.Error("Failed to create PDF directory", "guid", guid, "error", err)
+				break
+			}
+
+			// пустая строка нужна, чтобы появилась запись в мапе
+			// чтобы удалить лишнюю директорию в случае ошибки, так как она создается до генерации PDF
+			pdfguids[guid] = ""
+			pdfPath := filepath.Join(dir, seq+".pdf")
+
+			pdfer := pdf.NewHandler(s.PDFConfig)
+			pdfer.AddTitleAndHeader(fmt.Sprintf("Results for unit %s from file %s", guid, filename))
+			pdfer.AddDataRows(recs)
+			document, err := pdfer.Generate()
+			if err != nil {
+				critErr = err
+				s.logger.Error("Failed to generate PDF document", "guid", guid, "error", err)
+				break
+			}
+
+			// на случай, если в ДРУГИХ ФАЙЛАХ также есть одинаковый guid
+			s.gipMutex.Lock()
+			mc, exists := s.guidsInProgress[guid]
+			if exists {
+				mc.count++
+			} else {
+				mc = &MutexCounter{mu: &sync.Mutex{}, count: 1}
+				s.guidsInProgress[guid] = mc
+			}
+			s.gipMutex.Unlock()
+
+			mc.mu.Lock()
+			err = document.Save(pdfPath)
+			if err != nil {
+				mc.mu.Unlock()
+				critErr = err
+				s.logger.Error("Failed to generate PDF document", "guid", guid, "error", err)
+				break
+			}
+			mc.mu.Unlock()
+
+			pdfguids[guid] = seq
 		}
 
 		select {
