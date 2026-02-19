@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/glekoz/biocad/worker/config"
+	"github.com/glekoz/biocad/worker/internal/models"
 	"github.com/glekoz/biocad/worker/internal/service/helper"
 	"github.com/glekoz/biocad/worker/internal/service/pdf"
 	"github.com/glekoz/biocad/worker/pkg/logger"
@@ -23,6 +25,14 @@ type MutexCounter struct {
 }
 
 type RepoAPI interface {
+	BeginTx(ctx context.Context) (TxAPI, error)
+	SaveErroredFile(ctx context.Context, filename string, errText string) error
+}
+
+type TxAPI interface {
+	InsertRecord(ctx context.Context, rec models.TSVRecord) error
+	Commit(ctx context.Context) error
+	Rollback(ctx context.Context) error
 }
 
 type Service struct {
@@ -124,7 +134,7 @@ func (s *Service) Run(ctx context.Context) {
 			defer func() {
 				r := recover()
 				if r != nil {
-					s.logger.Error("Panic recovered in file processing: %v", r)
+					s.logger.Error("Panic recovered in .Run: %v", r)
 				}
 				<-s.semaphore
 				wg.Done()
@@ -140,10 +150,10 @@ func (s *Service) Run(ctx context.Context) {
 
 			tsvChan1, tsvChan2, err := s.streamTSV(iterCtx, filename)
 			if err != nil {
-				s.logger.Error("Failed to parse file", "file", filename, "error", err)
+				s.logger.ErrorContext(iterCtx, "Failed to parse file", "error", err)
 				return
 			}
-			errChanPDF := s.createPDFs(iterCtx, tsvChan1, filename)
+			errChanPDF := s.createPDFs(iterCtx, tsvChan1)
 			errChanDB := s.saveToDB(iterCtx, tsvChan2, filename)
 
 			// в данном случае поддерживаю консистентное состояние, при котором
@@ -158,19 +168,16 @@ func (s *Service) Run(ctx context.Context) {
 				select {
 				case err := <-errChanDB:
 					if err != nil {
-						s.logger.Error("Failed to save to DB", "file", filename, "error", err)
 						finalErr = err
 					}
 					errChanDB = nil
 				case err := <-errChanPDF:
 					if err != nil {
-						s.logger.Error("Failed to save to PDF", "file", filename, "error", err)
 						finalErr = err
 					}
 					errChanPDF = nil
-				case <-ctx.Done():
-					s.logger.Error("Processing timed out", "file", filename)
-					finalErr = ctx.Err()
+				case <-iterCtx.Done():
+					finalErr = iterCtx.Err()
 				}
 			}
 
@@ -178,15 +185,20 @@ func (s *Service) Run(ctx context.Context) {
 			// если произошла ошибка при перемещении файла,
 			// то он остается в мапе и не будет обрабатываться повторно
 			if finalErr != nil {
+				if errors.Is(finalErr, ErrInvalidFileFormat) {
+					s.logger.WarnContext(logger.ErrorCtx(iterCtx, finalErr), "Input error", "error", finalErr)
+				} else {
+					s.logger.ErrorContext(logger.ErrorCtx(iterCtx, finalErr), "System error", "error", finalErr)
+				}
 				err = helper.Move(s.SourcePath, s.ErrorPath, filename)
 				if err != nil {
-					s.logger.Error("Failed to move file to errors directory", "file", filename, "error", err)
+					s.logger.ErrorContext(iterCtx, "Failed to move file to errors directory", "error", err)
 					return
 				}
 			} else {
 				err = helper.Move(s.SourcePath, s.CompletedPath, filename)
 				if err != nil {
-					s.logger.Error("Failed to move file to completed directory", "file", filename, "error", err)
+					s.logger.ErrorContext(iterCtx, "Failed to move file to completed directory", "error", err)
 					return
 				}
 			}
@@ -195,20 +207,15 @@ func (s *Service) Run(ctx context.Context) {
 			delete(s.filesInProgress, filename)
 			s.fipMutex.Unlock()
 
-			s.logger.Info("Successfully processed file", "file", filename)
+			s.logger.InfoContext(iterCtx, "Successfully processed file")
 		}()
 
 	}
 	wg.Wait()
 }
 
-// func (s *Service) createPDFs(ctx context.Context, in <-chan LineBatch) <-chan error {
-func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, filename string) <-chan error {
+func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch) <-chan error {
 	out := make(chan error, 1)
-
-	// если батч ерр или отмена контекста, то действия одинаковые
-	// если тут произошла ошибка, то крит еррор не нил и просто читаю канал, чтобы
-	// не блокировать второй канал
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -218,13 +225,11 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 		}()
 
 		var critErr error
-		pdfguids := make(map[string]string) // мапа с ключом-guid и xid-файлом, которые добавляются из текущего файла - которую пускаю через ос.ремув
-		// recordsByID := make(map[string][]models.TSVRecord)
+		pdfguids := make(map[string]string) // ключ - guid, значение - xid (имя создаваемого pdf файла), которые добавляются из текущего обрабатываемого файла
 		recordsByID := make(map[string][][]string)
 
 		defer func() {
 			if critErr != nil {
-				// fmt.Println(pdfguids)
 				for guid, seq := range pdfguids {
 					dir := filepath.Join(s.PDFPath, guid)
 					if seq != "" {
@@ -274,24 +279,14 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 
 	outermost:
 		for batch := range in {
-
-			// если возможно продолжить работу при ошибке,
-			// то можно продолжить считывать из канала, но не обрабатывать данные
-			// для этого в последних ошибках надо убрать break outermost
-
-			// if critErr != nil {
-			// 	continue
-			// }
 			if batch.Err != nil {
 				critErr = batch.Err
-				s.logger.Error("Error in createPDFs batch", "error", critErr)
 				break
 			}
 			for i, rec := range batch.Records {
 				if i%(s.BatchSize>>1) == 0 {
 					if ctx.Err() != nil {
 						critErr = ctx.Err()
-						s.logger.Error("Context error in createPDFs", "error", critErr)
 						break outermost
 					}
 				}
@@ -302,11 +297,10 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 				}
 			}
 		}
-		// как будто есть потенциал для распараллеливания
 		for guid, recs := range recordsByID {
+			ctx = logger.WithDetails(ctx, "guid", guid)
 			if ctx.Err() != nil {
-				critErr = ctx.Err()
-				s.logger.Error("Context error in createPDFs", "error", critErr)
+				critErr = logger.WrapError(ctx, ctx.Err())
 				break
 			}
 
@@ -314,8 +308,8 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 			dir := filepath.Join(s.PDFPath, guid)
 			err := os.MkdirAll(dir, 0755)
 			if err != nil {
-				critErr = err
-				s.logger.Error("Failed to create PDF directory", "guid", guid, "error", err)
+				ctx = logger.WithDetails(ctx, "pdf dir", dir)
+				critErr = logger.WrapError(ctx, err)
 				break
 			}
 
@@ -325,12 +319,11 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 			pdfPath := filepath.Join(dir, seq+".pdf")
 
 			pdfer := pdf.NewHandler(s.PDFConfig)
-			pdfer.AddTitleAndHeader(fmt.Sprintf("Results for unit %s from file %s", guid, filename))
+			pdfer.AddTitleAndHeader(fmt.Sprintf("Results for guid %s from file %s", guid, helper.GetFilenameFromContext(ctx)))
 			pdfer.AddDataRows(recs)
 			document, err := pdfer.Generate()
 			if err != nil {
-				critErr = err
-				s.logger.Error("Failed to generate PDF document", "guid", guid, "error", err)
+				critErr = logger.WrapError(ctx, err)
 				break
 			}
 
@@ -349,8 +342,7 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 			err = document.Save(pdfPath)
 			if err != nil {
 				mc.mu.Unlock()
-				critErr = err
-				s.logger.Error("Failed to generate PDF document", "guid", guid, "error", err)
+				critErr = logger.WrapError(ctx, err)
 				break
 			}
 			mc.mu.Unlock()
@@ -360,13 +352,9 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 
 		select {
 		case <-ctx.Done():
-			s.logger.Error("Context error in createPDFs", "error", ctx.Err())
-			critErr = ctx.Err()
 		case out <- critErr:
 		}
-
 	}()
-
 	return out
 }
 
@@ -374,15 +362,134 @@ func (s *Service) saveToDB(ctx context.Context, in <-chan StringLineBatch, filen
 	out := make(chan error, 1)
 
 	go func() {
-		defer close(out)
-		for range in {
-			fmt.Println("Saving to DB from file", filename)
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("Panic recovered in saveToDB: %v", r)
+			}
+			close(out)
+		}()
+
+		if s.repo == nil {
+			select {
+			case <-ctx.Done():
+			case out <- errors.New("repository is not initialized"):
+			}
+			return
 		}
+
+		tx, err := s.repo.BeginTx(ctx)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+			case out <- err:
+			}
+			return
+		}
+
+		committed := false
+		defer func() {
+			if committed {
+				return
+			}
+			rbErr := tx.Rollback(context.WithoutCancel(ctx))
+			if rbErr != nil {
+				s.logger.ErrorContext(ctx, "Failed to rollback transaction", "error", rbErr)
+			}
+		}()
+
+		var finalErr error
+		checkEvery := s.BatchSize >> 1
+		if checkEvery == 0 {
+			checkEvery = 1
+		}
+	outer:
+		for batch := range in {
+			if batch.Err != nil {
+				finalErr = batch.Err
+				break
+			}
+
+			for i, rawRecord := range batch.Records {
+				if i%checkEvery == 0 {
+					if ctx.Err() != nil {
+						finalErr = ctx.Err()
+						break outer
+					}
+				}
+
+				rec, parseErr := mapRawRecordToTSV(rawRecord)
+				if parseErr != nil {
+					finalErr = parseErr
+					break outer
+				}
+
+				if err = tx.InsertRecord(ctx, rec); err != nil {
+					finalErr = err
+					break outer
+				}
+			}
+		}
+
+		if finalErr == nil {
+			err = tx.Commit(ctx)
+			if err != nil {
+				finalErr = err
+			} else {
+				committed = true
+			}
+		}
+
+		if finalErr != nil {
+			saveErr := s.repo.SaveErroredFile(context.WithoutCancel(ctx), filename, finalErr.Error())
+			if saveErr != nil {
+				s.logger.ErrorContext(ctx, "Failed to save errored file metadata", "error", saveErr, "filename", filename)
+			}
+			select {
+			case <-ctx.Done():
+			case out <- finalErr:
+			}
+			return
+		}
+
 		select {
 		case <-ctx.Done():
-			s.logger.Error("Context error in DB", "error", ctx.Err())
+			out <- ctx.Err()
 		case out <- nil:
 		}
 	}()
 	return out
+}
+
+func mapRawRecordToTSV(raw []string) (models.TSVRecord, error) {
+	if len(raw) != 15 {
+		return models.TSVRecord{}, fmt.Errorf("invalid record size: got %d, expected 15", len(raw))
+	}
+
+	n, err := strconv.Atoi(raw[0])
+	if err != nil {
+		return models.TSVRecord{}, fmt.Errorf("invalid n value %q: %w", raw[0], err)
+	}
+
+	level, err := strconv.Atoi(raw[8])
+	if err != nil {
+		return models.TSVRecord{}, fmt.Errorf("invalid level value %q: %w", raw[8], err)
+	}
+
+	return models.TSVRecord{
+		N:         n,
+		MQTT:      raw[1],
+		InvID:     raw[2],
+		UnitGUID:  raw[3],
+		MsgID:     raw[4],
+		Text:      raw[5],
+		Context:   raw[6],
+		Class:     raw[7],
+		Level:     level,
+		Area:      raw[9],
+		Addr:      raw[10],
+		Block:     raw[11],
+		Type:      raw[12],
+		Bit:       raw[13],
+		InvertBit: raw[14],
+	}, nil
 }

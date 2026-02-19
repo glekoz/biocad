@@ -27,7 +27,7 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 		defer func() {
 			r := recover()
 			if r != nil {
-				s.logger.ErrorContext(ctx, "Panic", "msg", r)
+				s.logger.Error("Panic recovered in streamTSV: %v", r)
 			}
 		}()
 		defer func() {
@@ -117,7 +117,7 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 			}
 
 			// валидация строки и преобразование её в нужную структуру
-			record, ok := s.parser.newStringRecord(line)
+			record, ok := s.parser.parse(line)
 			if !ok {
 				s.logger.WarnContext(ctx, "Строка не соответствует формату", "errs", record)
 				continue
@@ -153,7 +153,7 @@ func (s *Service) streamFiles(ctx context.Context) <-chan string {
 		defer func() {
 			r := recover()
 			if r != nil {
-				s.logger.ErrorContext(ctx, "Panic", "msg", r)
+				s.logger.Error("Panic recovered in streamFiles: %v", r)
 			}
 			close(filesChan)
 		}()
