@@ -7,12 +7,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/glekoz/biocad/worker/config"
-	"github.com/glekoz/biocad/worker/internal/models"
+	"github.com/glekoz/biocad/worker/internal/repository"
 	"github.com/glekoz/biocad/worker/internal/service/helper"
 	"github.com/glekoz/biocad/worker/internal/service/pdf"
 	"github.com/glekoz/biocad/worker/pkg/logger"
@@ -22,17 +21,6 @@ import (
 type MutexCounter struct {
 	mu    *sync.Mutex
 	count int
-}
-
-type RepoAPI interface {
-	BeginTx(ctx context.Context) (TxAPI, error)
-	SaveErroredFile(ctx context.Context, filename string, errText string) error
-}
-
-type TxAPI interface {
-	InsertRecord(ctx context.Context, rec models.TSVRecord) error
-	Commit(ctx context.Context) error
-	Rollback(ctx context.Context) error
 }
 
 type Service struct {
@@ -56,6 +44,11 @@ type Service struct {
 
 	guidsInProgress map[string]*MutexCounter // для блокировки работы с директориями [guid]mu
 	gipMutex        *sync.Mutex
+}
+
+type RepoAPI interface {
+	BeginTx(ctx context.Context) (repository.Tx, error)
+	SaveErroredFile(ctx context.Context, filename string, errText string) error
 }
 
 func New(cfg config.Worker, log *slog.Logger, r RepoAPI) (*Service, error) {
@@ -153,7 +146,7 @@ func (s *Service) Run(ctx context.Context) {
 				s.logger.ErrorContext(iterCtx, "Failed to parse file", "error", err)
 				return
 			}
-			errChanPDF := s.createPDFs(iterCtx, tsvChan1)
+			errChanPDF := s.createPDFs(iterCtx, tsvChan1, filename)
 			errChanDB := s.saveToDB(iterCtx, tsvChan2, filename)
 
 			// в данном случае поддерживаю консистентное состояние, при котором
@@ -190,6 +183,10 @@ func (s *Service) Run(ctx context.Context) {
 				} else {
 					s.logger.ErrorContext(logger.ErrorCtx(iterCtx, finalErr), "System error", "error", finalErr)
 				}
+				err = s.repo.SaveErroredFile(context.WithoutCancel(ctx), filename, finalErr.Error())
+				if err != nil {
+					s.logger.ErrorContext(ctx, "Ошибка сохранения информации об ошибочном файле", "error", err)
+				}
 				err = helper.Move(s.SourcePath, s.ErrorPath, filename)
 				if err != nil {
 					s.logger.ErrorContext(iterCtx, "Failed to move file to errors directory", "error", err)
@@ -214,7 +211,7 @@ func (s *Service) Run(ctx context.Context) {
 	wg.Wait()
 }
 
-func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch) <-chan error {
+func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, filename string) <-chan error {
 	out := make(chan error, 1)
 	go func() {
 		defer func() {
@@ -236,7 +233,7 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch) <-c
 						p := filepath.Join(dir, seq+".pdf")
 						err := os.Remove(p)
 						if err != nil {
-							s.logger.Error("Failed to remove PDF file during cleanup", "file", p, "error", err)
+							s.logger.Error("Ошибка удаления PDF файла во время очистки", "file", p, "error", err)
 							return
 						}
 					}
@@ -254,11 +251,11 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch) <-c
 					mc.mu.Lock()
 					entries, err := os.ReadDir(dir)
 					if err != nil {
-						s.logger.Error("Failed to read PDF directory during cleanup", "dir", dir, "error", err)
+						s.logger.Error("Ошибка чтения директории с PDF во время очистки", "dir", dir, "error", err)
 					} else if len(entries) == 0 {
 						err = os.Remove(dir)
 						if err != nil {
-							s.logger.Error("Failed to remove PDF directory during cleanup", "dir", dir, "error", err)
+							s.logger.Error("Ошибка удаления директории с PDF во время очистки", "dir", dir, "error", err)
 						}
 					}
 					mc.mu.Unlock()
@@ -277,6 +274,11 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch) <-c
 			s.gipMutex.Unlock()
 		}()
 
+		checkEvery := s.BatchSize >> 1
+		if checkEvery == 0 {
+			checkEvery = 1
+		}
+
 	outermost:
 		for batch := range in {
 			if batch.Err != nil {
@@ -284,7 +286,7 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch) <-c
 				break
 			}
 			for i, rec := range batch.Records {
-				if i%(s.BatchSize>>1) == 0 {
+				if i%checkEvery == 0 {
 					if ctx.Err() != nil {
 						critErr = ctx.Err()
 						break outermost
@@ -319,7 +321,7 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch) <-c
 			pdfPath := filepath.Join(dir, seq+".pdf")
 
 			pdfer := pdf.NewHandler(s.PDFConfig)
-			pdfer.AddTitleAndHeader(fmt.Sprintf("Results for guid %s from file %s", guid, helper.GetFilenameFromContext(ctx)))
+			pdfer.AddTitleAndHeader(fmt.Sprintf("Results for guid %s from file %s", guid, filename))
 			pdfer.AddDataRows(recs)
 			document, err := pdfer.Generate()
 			if err != nil {
@@ -352,6 +354,7 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch) <-c
 
 		select {
 		case <-ctx.Done():
+			critErr = ctx.Err()
 		case out <- critErr:
 		}
 	}()
@@ -369,14 +372,6 @@ func (s *Service) saveToDB(ctx context.Context, in <-chan StringLineBatch, filen
 			close(out)
 		}()
 
-		if s.repo == nil {
-			select {
-			case <-ctx.Done():
-			case out <- errors.New("repository is not initialized"):
-			}
-			return
-		}
-
 		tx, err := s.repo.BeginTx(ctx)
 		if err != nil {
 			select {
@@ -386,110 +381,46 @@ func (s *Service) saveToDB(ctx context.Context, in <-chan StringLineBatch, filen
 			return
 		}
 
-		committed := false
+		var critErr error
+
 		defer func() {
-			if committed {
-				return
+			if critErr == nil {
+				critErr = tx.Commit(ctx)
+				if critErr != nil {
+					s.logger.ErrorContext(ctx, "Ошибка коммита транзакции", "error", critErr)
+				}
 			}
-			rbErr := tx.Rollback(context.WithoutCancel(ctx))
-			if rbErr != nil {
-				s.logger.ErrorContext(ctx, "Failed to rollback transaction", "error", rbErr)
+			if critErr != nil {
+				err = tx.Rollback(context.WithoutCancel(ctx))
+				if err != nil {
+					s.logger.ErrorContext(ctx, "Failed to rollback transaction", "error", err)
+				}
 			}
 		}()
 
-		var finalErr error
 		checkEvery := s.BatchSize >> 1
 		if checkEvery == 0 {
 			checkEvery = 1
 		}
-	outer:
+
 		for batch := range in {
 			if batch.Err != nil {
-				finalErr = batch.Err
+				critErr = batch.Err
 				break
 			}
 
-			for i, rawRecord := range batch.Records {
-				if i%checkEvery == 0 {
-					if ctx.Err() != nil {
-						finalErr = ctx.Err()
-						break outer
-					}
-				}
-
-				rec, parseErr := mapRawRecordToTSV(rawRecord)
-				if parseErr != nil {
-					finalErr = parseErr
-					break outer
-				}
-
-				if err = tx.InsertRecord(ctx, rec); err != nil {
-					finalErr = err
-					break outer
-				}
-			}
-		}
-
-		if finalErr == nil {
-			err = tx.Commit(ctx)
+			err = tx.InsertRecordsBatch(ctx, batch.Records)
 			if err != nil {
-				finalErr = err
-			} else {
-				committed = true
+				critErr = err
+				break
 			}
-		}
-
-		if finalErr != nil {
-			saveErr := s.repo.SaveErroredFile(context.WithoutCancel(ctx), filename, finalErr.Error())
-			if saveErr != nil {
-				s.logger.ErrorContext(ctx, "Failed to save errored file metadata", "error", saveErr, "filename", filename)
-			}
-			select {
-			case <-ctx.Done():
-			case out <- finalErr:
-			}
-			return
 		}
 
 		select {
 		case <-ctx.Done():
-			out <- ctx.Err()
-		case out <- nil:
+			critErr = ctx.Err()
+		case out <- critErr:
 		}
 	}()
 	return out
-}
-
-func mapRawRecordToTSV(raw []string) (models.TSVRecord, error) {
-	if len(raw) != 15 {
-		return models.TSVRecord{}, fmt.Errorf("invalid record size: got %d, expected 15", len(raw))
-	}
-
-	n, err := strconv.Atoi(raw[0])
-	if err != nil {
-		return models.TSVRecord{}, fmt.Errorf("invalid n value %q: %w", raw[0], err)
-	}
-
-	level, err := strconv.Atoi(raw[8])
-	if err != nil {
-		return models.TSVRecord{}, fmt.Errorf("invalid level value %q: %w", raw[8], err)
-	}
-
-	return models.TSVRecord{
-		N:         n,
-		MQTT:      raw[1],
-		InvID:     raw[2],
-		UnitGUID:  raw[3],
-		MsgID:     raw[4],
-		Text:      raw[5],
-		Context:   raw[6],
-		Class:     raw[7],
-		Level:     level,
-		Area:      raw[9],
-		Addr:      raw[10],
-		Block:     raw[11],
-		Type:      raw[12],
-		Bit:       raw[13],
-		InvertBit: raw[14],
-	}, nil
 }

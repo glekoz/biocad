@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/glekoz/biocad/worker/internal/service/helper"
 )
 
 type StringLineBatch struct {
@@ -49,32 +51,12 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 			if errors.Is(err, io.EOF) {
 				return
 			}
-			out11, out22 := out1, out2
-			for range 2 {
-				select {
-				case <-ctx.Done():
-					return
-				case out11 <- StringLineBatch{Err: err}:
-					out11 = nil
-				case out22 <- StringLineBatch{Err: err}:
-					out22 = nil
-				}
-			}
+			helper.Tee(ctx, StringLineBatch{Err: err}, out1, out2)
 			return
 		}
 		ok := s.parser.validateHeaders(hs)
 		if !ok {
-			out11, out22 := out1, out2
-			for range 2 {
-				select {
-				case <-ctx.Done():
-					return
-				case out11 <- StringLineBatch{Err: ErrInvalidFileFormat}:
-					out11 = nil
-				case out22 <- StringLineBatch{Err: ErrInvalidFileFormat}:
-					out22 = nil
-				}
-			}
+			helper.Tee(ctx, StringLineBatch{Err: ErrInvalidFileFormat}, out1, out2)
 			return
 		}
 
@@ -88,31 +70,11 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					if len(batch) > 0 {
-						out11, out22 := out1, out2
-						for range 2 {
-							select {
-							case <-ctx.Done():
-								return
-							case out11 <- StringLineBatch{Records: batch}:
-								out11 = nil
-							case out22 <- StringLineBatch{Records: batch}:
-								out22 = nil
-							}
-						}
+						helper.Tee(ctx, StringLineBatch{Records: batch}, out1, out2)
 					}
 					break
 				}
-				out11, out22 := out1, out2
-				for range 2 {
-					select {
-					case <-ctx.Done():
-						return
-					case out11 <- StringLineBatch{Err: err}:
-						out11 = nil
-					case out22 <- StringLineBatch{Err: err}:
-						out22 = nil
-					}
-				}
+				helper.Tee(ctx, StringLineBatch{Err: err}, out1, out2)
 				return
 			}
 
@@ -125,17 +87,7 @@ func (s *Service) streamTSV(ctx context.Context, filename string) (<-chan String
 
 			batch = append(batch, record)
 			if len(batch) == s.BatchSize {
-				out11, out22 := out1, out2
-				for range 2 {
-					select {
-					case <-ctx.Done():
-						return
-					case out11 <- StringLineBatch{Records: batch}:
-						out11 = nil
-					case out22 <- StringLineBatch{Records: batch}:
-						out22 = nil
-					}
-				}
+				helper.Tee(ctx, StringLineBatch{Records: batch}, out1, out2)
 				// очистка батча для следующей порции данных
 				// если обнулить существующий, то он перезапишет данные, которые уже были отправлены в канал
 				batch = make([][]string, 0, s.BatchSize)
