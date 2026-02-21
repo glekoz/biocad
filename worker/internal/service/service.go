@@ -146,29 +146,32 @@ func (s *Service) Run(ctx context.Context) {
 				s.logger.ErrorContext(iterCtx, "Failed to parse file", "error", err)
 				return
 			}
-			errChanPDF := s.createPDFs(iterCtx, tsvChan1, filename)
-			errChanDB := s.saveToDB(iterCtx, tsvChan2, filename)
+			errChanPDF := s.createPDFs(iterCtx, tsvChan1)
+			errChanDB := s.saveToDB(iterCtx, tsvChan2)
 
 			// в данном случае поддерживаю консистентное состояние, при котором
 			// файл считается обработанным, только если оба канала ошибок вернули nil
 			// сначала жду ошибку из канала сохранения в БД, так как это более критичная операция, и если она не удалась, то нет смысла создавать PDF
 			var finalErr error
+			// так как прием значений из канала не гарантирует, что горутина, которая его пишет, уже завершилась,
+			// то нужно дождаться закрытия канала, чтобы убедиться, что все операции по сохранению в БД и созданию PDF завершены
+			ecpdf, ecdb := errChanPDF, errChanDB
 			for range 2 {
 				if finalErr != nil {
 					iterCancel()
 					break
 				}
 				select {
-				case err := <-errChanDB:
+				case err := <-ecdb:
 					if err != nil {
 						finalErr = err
 					}
-					errChanDB = nil
-				case err := <-errChanPDF:
+					ecdb = nil
+				case err := <-ecpdf:
 					if err != nil {
 						finalErr = err
 					}
-					errChanPDF = nil
+					ecpdf = nil
 				case <-iterCtx.Done():
 					finalErr = iterCtx.Err()
 				}
@@ -204,14 +207,19 @@ func (s *Service) Run(ctx context.Context) {
 			delete(s.filesInProgress, filename)
 			s.fipMutex.Unlock()
 
-			s.logger.InfoContext(iterCtx, "Successfully processed file")
-		}()
+			// жду закрытия каналов для корректной очистки ресурсов в defer
+			for range errChanPDF {
+			}
+			for range errChanDB {
+			}
 
+			s.logger.InfoContext(iterCtx, "Processed file")
+		}()
 	}
 	wg.Wait()
 }
 
-func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, filename string) <-chan error {
+func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch) <-chan error {
 	out := make(chan error, 1)
 	go func() {
 		defer func() {
@@ -321,7 +329,7 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 			pdfPath := filepath.Join(dir, seq+".pdf")
 
 			pdfer := pdf.NewHandler(s.PDFConfig)
-			pdfer.AddTitleAndHeader(fmt.Sprintf("Results for guid %s from file %s", guid, filename))
+			pdfer.AddTitleAndHeader(fmt.Sprintf("Results for guid %s from file %s", guid, helper.GetFilenameFromContext(ctx)))
 			pdfer.AddDataRows(recs)
 			document, err := pdfer.Generate()
 			if err != nil {
@@ -361,7 +369,7 @@ func (s *Service) createPDFs(ctx context.Context, in <-chan StringLineBatch, fil
 	return out
 }
 
-func (s *Service) saveToDB(ctx context.Context, in <-chan StringLineBatch, filename string) <-chan error {
+func (s *Service) saveToDB(ctx context.Context, in <-chan StringLineBatch) <-chan error {
 	out := make(chan error, 1)
 
 	go func() {
@@ -380,23 +388,9 @@ func (s *Service) saveToDB(ctx context.Context, in <-chan StringLineBatch, filen
 			}
 			return
 		}
+		defer tx.Rollback(context.WithoutCancel(ctx))
 
 		var critErr error
-
-		defer func() {
-			if critErr == nil {
-				critErr = tx.Commit(ctx)
-				if critErr != nil {
-					s.logger.ErrorContext(ctx, "Ошибка коммита транзакции", "error", critErr)
-				}
-			}
-			if critErr != nil {
-				err = tx.Rollback(context.WithoutCancel(ctx))
-				if err != nil {
-					s.logger.ErrorContext(ctx, "Failed to rollback transaction", "error", err)
-				}
-			}
-		}()
 
 		checkEvery := s.BatchSize >> 1
 		if checkEvery == 0 {
@@ -415,10 +409,18 @@ func (s *Service) saveToDB(ctx context.Context, in <-chan StringLineBatch, filen
 				break
 			}
 		}
+		if critErr == nil {
+			critErr = tx.Commit(ctx)
+		}
+		if critErr != nil {
+			err = tx.Rollback(context.WithoutCancel(ctx))
+			if err != nil {
+				s.logger.ErrorContext(ctx, "Failed to rollback transaction", "error", err)
+			}
+		}
 
 		select {
 		case <-ctx.Done():
-			critErr = ctx.Err()
 		case out <- critErr:
 		}
 	}()
