@@ -12,6 +12,8 @@ import (
 type RepoAPI interface {
 	GetByUnitGUID(ctx context.Context, unitGUID string, limit, offset int) ([]repository.Record, error)
 	CountByUnitGUID(ctx context.Context, unitGUID string) (int, error)
+	GetErroredFiles(ctx context.Context, limit, offset int) ([]repository.ErroredFile, error)
+	CountErroredFiles(ctx context.Context) (int, error)
 }
 
 type Service struct {
@@ -83,5 +85,52 @@ func (s *Service) GetRecords(ctx context.Context, unitGUID string, page, limit i
 		Page:    page,
 		Limit:   limit,
 		Total:   total,
+	}, nil
+}
+
+func (s *Service) GetErroredFiles(ctx context.Context, page, limit int) (models.PaginatedErroredFiles, error) {
+	if page < 1 {
+		return models.PaginatedErroredFiles{}, ErrInvalidPage
+	}
+	if limit < 1 || limit > 100 {
+		return models.PaginatedErroredFiles{}, ErrInvalidLimit
+	}
+
+	offset := (page - 1) * limit
+
+	total, err := s.repo.CountErroredFiles(ctx)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "count errored files failed", slog.String("error", err.Error()))
+		return models.PaginatedErroredFiles{}, err
+	}
+
+	if total == 0 {
+		return models.PaginatedErroredFiles{}, ErrNotFound
+	}
+
+	repoFiles, err := s.repo.GetErroredFiles(ctx, limit, offset)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return models.PaginatedErroredFiles{}, ErrNotFound
+		}
+		s.logger.ErrorContext(ctx, "get errored files failed", slog.String("error", err.Error()))
+		return models.PaginatedErroredFiles{}, err
+	}
+
+	files := make([]models.ErroredFile, len(repoFiles))
+	for i, f := range repoFiles {
+		files[i] = models.ErroredFile{
+			ID:        int(f.ID),
+			Filename:  f.Filename,
+			Error:     f.Error,
+			CreatedAt: f.CreatedAt,
+		}
+	}
+
+	return models.PaginatedErroredFiles{
+		Files: files,
+		Page:  page,
+		Limit: limit,
+		Total: total,
 	}, nil
 }

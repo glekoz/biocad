@@ -28,3 +28,17 @@ type PaginatedRecords struct {
 	Limit   int
 	Total   int
 }
+
+type ErroredFile struct {
+	ID        int
+	Filename  string
+	Error     string
+	CreatedAt time.Time
+}
+
+type PaginatedErroredFiles struct {
+	Files []ErroredFile
+	Page  int
+	Limit int
+	Total int
+}

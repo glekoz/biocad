@@ -8,3 +8,12 @@ FROM records
 WHERE unit_guid = $1
 ORDER BY id
 LIMIT $2 OFFSET $3;
+
+-- name: CountErroredFiles :one
+SELECT count(*) FROM errored_files;
+
+-- name: GetErroredFiles :many
+SELECT id, filename, error, created_at
+FROM errored_files
+ORDER BY created_at DESC
+LIMIT $1 OFFSET $2;

@@ -18,6 +18,20 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
+// ErroredFile defines model for ErroredFile.
+type ErroredFile struct {
+	CreatedAt time.Time `json:"created_at"`
+	Error     string    `json:"error"`
+	Filename  string    `json:"filename"`
+	Id        int       `json:"id"`
+}
+
+// ErroredFilesResponse defines model for ErroredFilesResponse.
+type ErroredFilesResponse struct {
+	Files      []ErroredFile `json:"files"`
+	Pagination Pagination    `json:"pagination"`
+}
+
 // Pagination defines model for Pagination.
 type Pagination struct {
 	Limit int `json:"limit"`
@@ -54,6 +68,15 @@ type RecordsResponse struct {
 	Records    []Record   `json:"records"`
 }
 
+// GetErroredFilesParams defines parameters for GetErroredFiles.
+type GetErroredFilesParams struct {
+	// Page Номер страницы (начиная с 1)
+	Page *int `form:"page,omitempty" json:"page,omitempty"`
+
+	// Limit Количество записей на странице
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
 // GetRecordsParams defines parameters for GetRecords.
 type GetRecordsParams struct {
 	// Page Номер страницы (начиная с 1)
@@ -65,8 +88,11 @@ type GetRecordsParams struct {
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// Получить список файлов с ошибками обработки
+	// (GET /api/v1/errors)
+	GetErroredFiles(w http.ResponseWriter, r *http.Request, params GetErroredFilesParams)
 	// Получить записи по unit_guid с пагинацией
-	// (GET /api/v1/{unit_guid})
+	// (GET /api/v1/records/{unit_guid})
 	GetRecords(w http.ResponseWriter, r *http.Request, unitGuid string, params GetRecordsParams)
 }
 
@@ -78,6 +104,41 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// GetErroredFiles operation middleware
+func (siw *ServerInterfaceWrapper) GetErroredFiles(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetErroredFilesParams
+
+	// ------------- Optional query parameter "page" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "page", r.URL.Query(), &params.Page)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "page", Err: err})
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "limit", r.URL.Query(), &params.Limit)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetErroredFiles(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // GetRecords operation middleware
 func (siw *ServerInterfaceWrapper) GetRecords(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +304,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 		ErrorHandlerFunc:   options.ErrorHandlerFunc,
 	}
 
-	m.HandleFunc("GET "+options.BaseURL+"/api/v1/{unit_guid}", wrapper.GetRecords)
+	m.HandleFunc("GET "+options.BaseURL+"/api/v1/errors", wrapper.GetErroredFiles)
+	m.HandleFunc("GET "+options.BaseURL+"/api/v1/records/{unit_guid}", wrapper.GetRecords)
 
 	return m
 }

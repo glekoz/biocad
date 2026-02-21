@@ -49,3 +49,43 @@ func (q *Queries) GetByUnitGUID(ctx context.Context, arg GetByUnitGUIDParams) ([
 	}
 	return records, rows.Err()
 }
+
+const countErroredFiles = `-- name: CountErroredFiles :one
+SELECT count(*) FROM errored_files
+`
+
+func (q *Queries) CountErroredFiles(ctx context.Context) (int64, error) {
+	var count int64
+	err := q.db.QueryRow(ctx, countErroredFiles).Scan(&count)
+	return count, err
+}
+
+const getErroredFiles = `-- name: GetErroredFiles :many
+SELECT id, filename, error, created_at
+FROM errored_files
+ORDER BY created_at DESC
+LIMIT $1 OFFSET $2
+`
+
+type GetErroredFilesParams struct {
+	Limit  int32
+	Offset int32
+}
+
+func (q *Queries) GetErroredFiles(ctx context.Context, arg GetErroredFilesParams) ([]ErroredFile, error) {
+	rows, err := q.db.Query(ctx, getErroredFiles, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []ErroredFile
+	for rows.Next() {
+		var f ErroredFile
+		if err := rows.Scan(&f.ID, &f.Filename, &f.Error, &f.CreatedAt); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}

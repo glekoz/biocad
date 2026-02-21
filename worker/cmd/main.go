@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -11,9 +12,18 @@ import (
 	"github.com/glekoz/biocad/worker/internal/repository"
 	"github.com/glekoz/biocad/worker/internal/service"
 	"github.com/glekoz/biocad/worker/pkg/logger"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	envFile := flag.String("env-file", "", "path to .env file")
+	flag.Parse()
+
+	if *envFile != "" {
+		if err := godotenv.Load(*envFile); err != nil {
+			log.Fatalf("failed to load env file %q: %v", *envFile, err)
+		}
+	}
 	cfg, err := config.NewConfig()
 	if err != nil {
 		log.Fatal(err)

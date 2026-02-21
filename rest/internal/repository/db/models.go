@@ -25,3 +25,10 @@ type Record struct {
 	InvertBit pgtype.Text
 	CreatedAt time.Time
 }
+
+type ErroredFile struct {
+	ID        int32
+	Filename  string
+	Error     string
+	CreatedAt time.Time
+}

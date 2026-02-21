@@ -1,0 +1,58 @@
+services:
+  rest:
+    env_file:
+      - ${BIOCAD_ENV_FILE}
+    build:
+      context: rest
+      dockerfile: Dockerfile
+    ports:
+      - ${BIOCAD_SERVER_PORT}:${BIOCAD_SERVER_PORT}
+    command: >
+      sh -c '
+      export BIOCAD_PG_HOST=$$( [ "$$BIOCAD_PG_IS_CONTAINERIZED" = "true" ] && echo "db" || echo "$$BIOCAD_PG_HOST" ) &&
+      /usr/bin/biocad-web
+      '
+
+    depends_on:
+      worker:
+        condition: service_started
+      db:
+        condition: service_healthy
+  
+  worker:
+    env_file:
+      - ${BIOCAD_ENV_FILE}
+    build:
+      context: worker
+      dockerfile: Dockerfile
+    command: >
+      sh -c '
+      export BIOCAD_PG_HOST=$$( [ "$$BIOCAD_PG_IS_CONTAINERIZED" = "true" ] && echo "db" || echo "$$BIOCAD_PG_HOST" ) &&
+      goose -dir "/src/migrations" postgres "postgres://$${BIOCAD_PG_USER}:$${BIOCAD_PG_PASSWORD}@$${BIOCAD_PG_HOST}:$${BIOCAD_PG_PORT}/$${BIOCAD_PG_DBNAME}?sslmode=$${BIOCAD_PG_SSLMODE}" up &&
+      /usr/bin/biocad-worker
+      '
+    volumes:
+      - ./tmp-dir:${BIOCAD_DIR_PATH}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:18.2-alpine3.22
+    container_name: biocad_db
+    environment:
+      - POSTGRES_DB=${BIOCAD_PG_DBNAME}
+      - POSTGRES_USER=${BIOCAD_PG_USER}
+      - POSTGRES_PASSWORD=${BIOCAD_PG_PASSWORD}
+    ports:
+      - ${BIOCAD_PG_PORT}:5432
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${BIOCAD_PG_USER}"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - biocad_db_data:/var/lib/postgresql/data
+
+volumes:
+  biocad_db_data:

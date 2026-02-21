@@ -6,6 +6,7 @@ require (
 	github.com/caarlos0/env/v11 v11.3.1
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/johnfercher/maroto/v2 v2.3.3
+	github.com/joho/godotenv v1.5.1
 	github.com/rs/xid v1.6.0
 )
 

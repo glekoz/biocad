@@ -31,6 +31,8 @@ github.com/johnfercher/go-tree v1.1.0 h1:L0Fs5jLR1uA2e/CwfHjNdO/Lt4IGQ46QgxarAC1
 github.com/johnfercher/go-tree v1.1.0/go.mod h1:DUO6QkXIFh1K7jeGBIkLCZaeUgnkdQAsB64FDSoHswg=
 github.com/johnfercher/maroto/v2 v2.3.3 h1:oeXsBnoecaMgRDwN0Cstjoe4rug3lKpOanuxuHKPqQE=
 github.com/johnfercher/maroto/v2 v2.3.3/go.mod h1:KNv102TwUrlVgZGukzlIbhkG6l/WaCD6pzu6aWGVjBI=
+github.com/joho/godotenv v1.5.1 h1:7eLL/+HRGLY0ldzfGMeQkb7vMd0as4CfYvUVzLqw0N0=
+github.com/joho/godotenv v1.5.1/go.mod h1:f4LDr5Voq0i2e/R5DDNOoa2zzDfwtkZa6DnEwAbqwq4=
 github.com/jung-kurt/gofpdf v1.0.0/go.mod h1:7Id9E/uU8ce6rXgefFLlgrJj/GYY22cpxn+r32jIOes=
 github.com/kr/pretty v0.3.0 h1:WgNl7dwNpEZ6jJ9k1snq4pZsg7DOEN8hP9Xw0Tsjwk0=
 github.com/kr/pretty v0.3.0/go.mod h1:640gp4NfQd8pI5XOwp5fnNeVWj67G7CFk/SaSQn7NBk=

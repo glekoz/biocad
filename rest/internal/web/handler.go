@@ -14,6 +14,7 @@ import (
 
 type ServiceAPI interface {
 	GetRecords(ctx context.Context, unitGUID string, page, limit int) (models.PaginatedRecords, error)
+	GetErroredFiles(ctx context.Context, page, limit int) (models.PaginatedErroredFiles, error)
 }
 
 type Handler struct {
@@ -102,8 +103,48 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
+// GetErroredFiles реализует интерфейс api.ServerInterface.
+// Возвращает список файлов, при обработке которых произошла ошибка.
+func (h *Handler) GetErroredFiles(w http.ResponseWriter, r *http.Request, params api.GetErroredFilesParams) {
+	page := 1
+	if params.Page != nil {
+		page = *params.Page
+	}
+
+	limit := 10
+	if params.Limit != nil {
+		limit = *params.Limit
+	}
+
+	result, err := h.svc.GetErroredFiles(r.Context(), page, limit)
+	if err != nil {
+		h.handleError(w, err)
+		return
+	}
+
+	resp := api.ErroredFilesResponse{
+		Files: make([]api.ErroredFile, 0, len(result.Files)),
+		Pagination: api.Pagination{
+			Page:  result.Page,
+			Limit: result.Limit,
+			Total: result.Total,
+		},
+	}
+
+	for _, f := range result.Files {
+		resp.Files = append(resp.Files, api.ErroredFile{
+			Id:        f.ID,
+			Filename:  f.Filename,
+			Error:     f.Error,
+			CreatedAt: f.CreatedAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // NewServer создаёт http.Handler с маршрутами из OpenAPI спецификации.
-// Производит регистрацию маршрута: GET /api/v1/{unit_guid}
+// Маршруты: GET /api/v1/errors, GET /api/v1/{unit_guid}
 func NewServer(handler *Handler) http.Handler {
 	return api.Handler(handler)
 }

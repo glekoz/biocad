@@ -31,6 +31,13 @@ type Record struct {
 	CreatedAt time.Time
 }
 
+type ErroredFile struct {
+	ID        int32
+	Filename  string
+	Error     string
+	CreatedAt time.Time
+}
+
 type Repository struct {
 	q    *db.Queries
 	pool *pgxpool.Pool
@@ -49,8 +56,17 @@ func NewPool(ctx context.Context, config config.Config) (*pgxpool.Pool, error) {
 	poolCfg.MaxConns = int32(config.PG.PoolMax)
 	poolCfg.MinConns = 2
 	poolCfg.HealthCheckPeriod = 1 * time.Minute
+	p, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return nil, err
+	}
+	err = p.Ping(ctx)
+	if err != nil {
+		p.Close()
+		return nil, err
+	}
 
-	return pgxpool.NewWithConfig(ctx, poolCfg)
+	return p, nil
 }
 
 func New(pool *pgxpool.Pool) *Repository {
@@ -105,6 +121,39 @@ func (r *Repository) GetByUnitGUID(ctx context.Context, unitGUID string, limit, 
 		}
 	}
 	return records, nil
+}
+
+func (r *Repository) CountErroredFiles(ctx context.Context) (int, error) {
+	count, err := r.q.CountErroredFiles(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count errored files: %w", err)
+	}
+	return int(count), nil
+}
+
+func (r *Repository) GetErroredFiles(ctx context.Context, limit, offset int) ([]ErroredFile, error) {
+	rows, err := r.q.GetErroredFiles(ctx, db.GetErroredFilesParams{
+		Limit:  int32(limit),
+		Offset: int32(offset),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query errored files: %w", err)
+	}
+
+	if len(rows) == 0 {
+		return nil, ErrNotFound
+	}
+
+	files := make([]ErroredFile, len(rows))
+	for i, row := range rows {
+		files[i] = ErroredFile{
+			ID:        row.ID,
+			Filename:  row.Filename,
+			Error:     row.Error,
+			CreatedAt: row.CreatedAt,
+		}
+	}
+	return files, nil
 }
 
 func nullableText(t pgtype.Text) *string {

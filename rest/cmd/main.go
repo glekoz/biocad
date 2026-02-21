@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -15,9 +16,18 @@ import (
 	"github.com/glekoz/rest/internal/repository"
 	"github.com/glekoz/rest/internal/service"
 	"github.com/glekoz/rest/internal/web"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	envFile := flag.String("env-file", "", "path to .env file")
+	flag.Parse()
+
+	if *envFile != "" {
+		if err := godotenv.Load(*envFile); err != nil {
+			log.Fatalf("failed to load env file %q: %v", *envFile, err)
+		}
+	}
 	cfg, err := config.NewConfig()
 	if err != nil {
 		log.Fatal(err)
