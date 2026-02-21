@@ -1,0 +1,156 @@
+openapi: "3.2.0"
+info:
+  title: Biocad Records API
+  description: REST API для получения записей из БД по unit_guid с пагинацией
+  version: "1.0.0"
+
+paths:
+
+  /api/v1/{unit_guid}:
+    get:
+      operationId: getRecords
+      summary: Получить записи по unit_guid с пагинацией
+      parameters:
+        - name: unit_guid
+          in: path
+          required: true
+          description: GUID юнита для фильтрации
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: false
+          description: Номер страницы (начиная с 1)
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          description: Количество записей на странице
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+      responses:
+        "200":
+          description: Список записей
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecordsResponse"
+        "400":
+          description: Невалидные параметры запроса
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Записи не найдены
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Внутренняя ошибка сервера
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    Record:
+      type: object
+      required:
+        - id
+        - n
+        - invid
+        - unit_guid
+        - msg_id
+        - text
+        - class
+        - level
+        - area
+        - addr
+        - created_at
+      properties:
+        id:
+          type: integer
+        n:
+          type: integer
+        mqtt:
+          type: string
+          nullable: true
+        invid:
+          type: string
+        unit_guid:
+          type: string
+        msg_id:
+          type: string
+        text:
+          type: string
+        context:
+          type: string
+          nullable: true
+        class:
+          type: string
+        level:
+          type: integer
+        area:
+          type: string
+        addr:
+          type: string
+        block:
+          type: string
+          nullable: true
+        type:
+          type: string
+          nullable: true
+        bit:
+          type: string
+          nullable: true
+        invert_bit:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    Pagination:
+      type: object
+      required:
+        - page
+        - limit
+        - total
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+          description: Общее количество записей
+
+    RecordsResponse:
+      type: object
+      required:
+        - records
+        - pagination
+      properties:
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/Record"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
