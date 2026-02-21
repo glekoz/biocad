@@ -26,7 +26,7 @@ func main() {
 	pool, err := repository.NewPool(ctx, cfg)
 	if err != nil {
 		logger.Error("Подключение к БД", "error", err)
-		return
+		os.Exit(1)
 	}
 	defer pool.Close()
 
@@ -35,7 +35,7 @@ func main() {
 	svc, err := service.New(cfg.Worker, logger, repo)
 	if err != nil {
 		logger.Error("Создание сервиса", "error", err)
-		return
+		os.Exit(1)
 	}
 
 	sigChan := make(chan os.Signal, 1)

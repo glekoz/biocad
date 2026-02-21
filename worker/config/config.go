@@ -20,11 +20,6 @@ type (
 		FileProcessingTimeoutSeconds int    `env:"BIOCAD_FILE_PROCESSING_TIMEOUT_SECONDS" envDefault:"300"`
 	}
 
-	// connStr := "postgres://username:secure-password@localhost:port/mydb?sslmode=require"
-	// PG struct {
-	// 	URL     string `env:"BIOCAD_PG_URL,required"`
-	// 	PoolMax int    `env:"BIOCAD_PG_POOL_MAX,required"`
-	// }
 	PG struct {
 		User     string `env:"BIOCAD_PG_USER,required"`
 		Password string `env:"BIOCAD_PG_PASSWORD,required"`

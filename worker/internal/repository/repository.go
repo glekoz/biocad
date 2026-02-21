@@ -29,10 +29,6 @@ type Transaction struct {
 func NewPool(ctx context.Context, config config.Config) (*pgxpool.Pool, error) {
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s", config.PG.User, config.PG.Password, config.PG.Host, config.PG.Port, config.PG.DBName, config.PG.SSLMode)
 
-	// ccfg, err := pgx.ParseConfig(dsn)
-	// if err != nil {
-	// 	return nil, err
-	// }
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, err
