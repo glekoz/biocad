@@ -104,11 +104,12 @@ BIOCAD_FILE_PROCESSING_TIMEOUT_SECONDS=300  # опционально, по ум�
 Запускает все три сервиса (PostgreSQL, worker, REST API) в контейнерах. Миграции применяются автоматически при старте worker.
 
 ```Powershell
-# Установить путь к .env и запустить
+# Powershell: установить путь к .env и запустить
 $env:BIOCAD_ENV_FILE=".env"; docker-compose --env-file $env:BIOCAD_ENV_FILE up --build
 ```
 
 ```bash
+# bash: установить путь к .env и запустить
 BIOCAD_ENV_FILE=".env" docker-compose --env-file $BIOCAD_ENV_FILE up --buil
 ```
 
@@ -132,6 +133,7 @@ docker-compose down -v
 
 ### 1. Применить миграции
 
+Используя, например, следующий код
 ```bash
 goose -dir worker/internal/repository/migrations \
   postgres "postgres://postgres:secret@localhost:5432/biocad?sslmode=disable" up
@@ -141,28 +143,14 @@ goose -dir worker/internal/repository/migrations \
 
 ```bash
 cd worker
-go run ./cmd/main.go --env-file ../.env
-```
-
-Или собрать и запустить бинарник:
-```bash
-cd worker
-go build -o biocad-worker ./cmd/main.go
-./biocad-worker --env-file ../.env
+go run ./cmd/main.go --env-file <путь_к_env_файлу>
 ```
 
 ### 3. Запустить REST API
 
 ```bash
 cd rest
-go run ./cmd/main.go --env-file ../.env
-```
-
-Или:
-```bash
-cd rest
-go build -o biocad-web ./cmd/main.go
-./biocad-web --env-file ../.env
+go run ./cmd/main.go --env-file <путь_к_env_файлу>
 ```
 
 > **Примечание:** Флаг `--env-file` загружает переменные из указанного `.env` файла. Без флага переменные берутся из окружения оболочки. При локальном запуске установите `BIOCAD_PG_IS_CONTAINERIZED=false` и укажите реальный `BIOCAD_PG_HOST`.
@@ -264,10 +252,3 @@ curl "http://localhost:8080/api/v1/errors?page=1&limit=5"
 4. После обработки файл переместится в `completed/`, а PDF появятся в `pdfs/<unit_guid>/`
 5. Запросите данные через REST API
 
-```bash
-# Добавить файл
-cp data.tsv ./tmp-dir/
-
-# Через 5 секунд запросить данные
-curl "http://localhost:8080/api/v1/records/01749246-95f6-57db-b7c3-2ae0e8be671f"
-```
