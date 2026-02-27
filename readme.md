@@ -247,8 +247,6 @@ curl "http://localhost:8080/api/v1/errors?page=1&limit=5"
 ## Типовой сценарий использования
 
 1. Запустите систему (Docker Compose или отдельные процессы)
-2. Скопируйте `.tsv` файл в `<BIOCAD_DIR_PATH>/` (или `./tmp-dir/` при Docker)
-3. Worker подхватит файл в течение `BIOCAD_POLL_INTERVAL_MS` миллисекунд
-4. После обработки файл переместится в `completed/`, а PDF появятся в `pdfs/<unit_guid>/`
-5. Запросите данные через REST API
-
+2. Worker подхватит файл в течение `BIOCAD_POLL_INTERVAL_MS` миллисекунд
+3. После обработки файл переместится в `completed/`, а PDF появятся в `pdfs/<unit_guid>/`
+4. Запросите данные через REST API
